@@ -1,0 +1,1 @@
+`include "disciplin.vams'module asmhemt_rnn(d, g, s, b, dt);  input d, g, s, b, dt;  // TODO: вставить вызов ONNX runtime для расчёта I(t)endmodule

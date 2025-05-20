@@ -1,0 +1,44 @@
+`include "disciplines.vams"
+
+module diode(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    
+    // Электрические параметры
+    parameter real Is = 1e-14;   // Ток насыщения
+    parameter real N = 1.0;      // Фактор идеальности 
+    parameter real Rs = 1.0;     // Последовательное сопротивление
+    parameter real Cj0 = 1e-12;  // Барьерная емкость при нулевом смещении
+    parameter real Vj = 1.0;     // Контактная разность потенциалов
+    parameter real M = 0.5;      // Коэффициент градиента перехода
+    
+    // Тепловые параметры
+    parameter real Rth = 100.0;  // Тепловое сопротивление
+    parameter real Cth = 1e-3;   // Тепловая емкость
+    parameter real alphaT = 3e-3; // Температурный коэффициент
+    
+    // Внутренние переменные
+    real v, i, vd, id, T, dT;
+    
+    analog begin
+        // Напряжение и ток на выводах
+        v = V(anode, cathode);
+        i = I(anode, cathode);
+        
+        // Падение напряжения на диоде без Rs
+        vd = v - i*Rs;
+        
+        // Расчет самонагрева
+        dT = Pwr(v, i) * Rth;
+        T = dT * (1.0 - exp(-$abstime/(Rth*Cth)));
+        
+        // Модель диода с учетом температуры
+        id = Is * exp(vd/(N*0.026*(1 + alphaT*T))) * (1 + alphaT*T);
+        
+        // Ток через диод
+        I(anode, cathode) <+ id;
+        
+        // Барьерная емкость
+        I(anode, cathode) <+ ddt(Cj0 * pow(1 - min(vd, Vj-0.1)/Vj, -M) * v);
+    end
+endmodule 

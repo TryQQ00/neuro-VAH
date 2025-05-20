@@ -1,0 +1,56 @@
+`include "disciplines.vams"
+
+module memristor(p, n);
+    inout p, n;
+    electrical p, n;
+    
+    // Параметры модели
+    parameter real Ron = 100.0;     // Сопротивление в ON состоянии
+    parameter real Roff = 16e3;     // Сопротивление в OFF состоянии
+    parameter real Rinit = 11e3;    // Начальное сопротивление
+    parameter real D = 10e-9;       // Толщина устройства
+    parameter real uv = 1e-14;      // Подвижность ионов
+    parameter real w_init = 0.5;    // Начальная ширина допированной области (0-1)
+    parameter real p_coeff = 2;     // Коэффициент нелинейности окна
+    parameter real Vt = 0.1;        // Пороговое напряжение
+    
+    // Внутренние переменные
+    real v, i, R, w, dwdt, f_w;
+    
+    // Внутренняя переменная состояния
+    real w_state;
+    
+    analog begin
+        // Инициализация состояния
+        @(initial_step) begin
+            w_state = w_init;
+        end
+        
+        // Напряжение и ток
+        v = V(p, n);
+        
+        // Состояние мемристора (нормированная ширина допированной области)
+        w = w_state;
+        
+        // Нелинейная функция окна
+        f_w = 1 - pow(2*w - 1, 2*p_coeff);
+        
+        // Динамическое изменение состояния
+        if (abs(v) >= Vt) begin
+            dwdt = uv * Ron * i / D^2 * f_w;
+            w_state = idt(dwdt, w_init);
+            
+            // Ограничение состояния
+            w_state = min(max(w_state, 0.01), 0.99);
+        end
+        
+        // Текущее сопротивление мемристора
+        R = Ron * w + Roff * (1 - w);
+        
+        // Ток
+        i = v / R;
+        
+        // Обновление выхода
+        I(p, n) <+ i;
+    end
+endmodule 

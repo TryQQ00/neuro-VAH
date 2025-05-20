@@ -1,0 +1,59 @@
+`include "disciplines.vams"
+
+module mosfet(drain, gate, source);
+    inout drain, gate, source;
+    electrical drain, gate, source;
+    
+    // Электрические параметры
+    parameter real Vth = 0.7;     // Пороговое напряжение
+    parameter real K = 2e-5;      // Коэффициент усиления
+    parameter real Lambda = 0.01;  // Коэффициент модуляции длины канала
+    parameter real Gamma = 0.0;    // Коэффициент подложки
+    parameter real Phi = 0.6;      // Поверхностный потенциал
+    
+    // Емкостные параметры
+    parameter real Cgso = 1e-9;   // Емкость перекрытия затвор-исток
+    parameter real Cgdo = 1e-9;   // Емкость перекрытия затвор-сток
+    parameter real Cgbo = 1e-10;  // Емкость затвор-подложка
+    parameter real Cj = 2e-10;    // Емкость p-n перехода
+    
+    // Тепловые параметры
+    parameter real Rth = 100.0;   // Тепловое сопротивление
+    parameter real Cth = 1e-3;    // Тепловая емкость
+    
+    // Внутренние переменные
+    real vgs, vds, id, gm, gds, T;
+    
+    analog begin
+        // Напряжения на выводах
+        vgs = V(gate, source);
+        vds = V(drain, source);
+        
+        // Расчет самонагрева
+        T = Pwr(vds, I(drain, source)) * Rth * (1.0 - exp(-$abstime/(Rth*Cth)));
+        
+        // Модель MOSFET в режиме насыщения и линейном режиме
+        if (vgs <= Vth) begin
+            // Подпороговый режим
+            id = 1e-12 * exp((vgs-Vth)/(0.026*(1+T*0.01)));
+        end else if (vds < vgs - Vth) begin
+            // Линейный режим
+            id = K * (2*(vgs-Vth)*vds - vds*vds) * (1 + Lambda*vds) * (1 + T*0.01);
+        end else begin
+            // Режим насыщения
+            id = K * (vgs-Vth)*(vgs-Vth) * (1 + Lambda*vds) * (1 + T*0.01);
+        end
+        
+        // Ток стока
+        I(drain, source) <+ id;
+        
+        // Емкостные токи
+        I(gate, source) <+ ddt(Cgso * V(gate, source));
+        I(gate, drain) <+ ddt(Cgdo * V(gate, drain));
+        
+        // Емкость p-n перехода стока
+        if (vds > 0) begin
+            I(drain, source) <+ ddt(Cj * (1 - vds/0.6)^(-0.5) * vds);
+        end
+    end
+endmodule 
