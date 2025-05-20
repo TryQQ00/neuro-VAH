@@ -40,7 +40,7 @@ class DeviceModel:
         tauH (float): Постоянная времени гистерезиса
     """
     
-    SUPPORTED_DEVICES = ['Диод', 'BJT', 'HEMT', 'Memristor']
+    SUPPORTED_DEVICES = ['Диод']
     INTEGRATION_METHODS = ['euler', 'rk2', 'rk4', 'adaptive']
     
     def __init__(self, params: Dict[str, float], dev_type: str):
@@ -55,8 +55,6 @@ class DeviceModel:
             ValueError: Если указан неподдерживаемый тип устройства
         """
         if dev_type not in self.SUPPORTED_DEVICES:
-            supported = ', '.join(self.SUPPORTED_DEVICES)
-            logger.error(f"Неподдерживаемый тип устройства: {dev_type}. Поддерживаются: {supported}")
             raise ValueError(f"Неподдерживаемый тип устройства: {dev_type}")
             
         self.p = params.copy()  # Создаем копию параметров для безопасности
@@ -134,40 +132,12 @@ class DeviceModel:
         Returns:
             float: Ток через устройство
         """
-        # Диодная модель
         if self.dev == 'Диод':
             Is = self.p.get('Is', 1e-14)
             n = self.p.get('N', 1.0)
             Vt = 0.02585 * (self.T / 300)
-            i0 = Is * (np.exp(v / (n * Vt)) - 1)
-            
-        # Биполярный транзистор
-        elif self.dev == 'BJT':
-            Is = self.p.get('IS', 1e-15)
-            beta = self.p.get('BF', 100)
-            Vt = self.p.get('Vt', 0.02585 * (self.T / 300))
-            ib = Is * (np.exp(v / Vt) - 1)
-            i0 = beta * ib
-            
-        # HEMT (High Electron Mobility Transistor)
-        elif self.dev == 'HEMT':
-            Vth = self.p.get('VTH0', 1.0)
-            Kp = self.p.get('Kp', 1.0)
-            i0 = 0.0 if v <= Vth else Kp * (v - Vth) ** 2
-            
-        # Мемристор
-        elif self.dev == 'Memristor':
-            Ron = self.p.get('Ron', 100)
-            Roff = self.p.get('Roff', 16000)
-            a = self.p.get('a', 10)
-            v0 = self.p.get('v0', 0.5)
-            G = Ron + (Roff - Ron) / (1 + np.exp(-a * (v - v0)))
-            i0 = v / G  # Проводимость → ток
-            
-        else:
-            i0 = 0.0
-            
-        return i0
+            return Is * (np.exp(v / (n * Vt)) - 1)
+        return 0.0
         
     def _static_current_vector(self, v_arr: np.ndarray) -> np.ndarray:
         """
@@ -377,64 +347,33 @@ class DeviceModel:
                 return s2, dt  # Возвращаем результат несмотря на ошибку
             return self._adaptive_step(state, v, new_dt, error_tol)
     
-    def simulate(self, v_arr: np.ndarray, dt: Optional[float] = None, method: str = 'euler') -> np.ndarray:
+    def simulate(self, v_arr: np.ndarray, dt: float = 1e-6) -> np.ndarray:
         """
         Производит симуляцию отклика устройства на заданное напряжение.
         
         Args:
             v_arr (np.ndarray): Массив напряжений
-            dt (Optional[float]): Шаг по времени (если None, используется 1мкс)
-            method (str): Метод интегрирования ('euler', 'rk2' или 'rk4')
+            dt (float): Шаг по времени (если None, используется 1мкс)
             
         Returns:
             np.ndarray: Массив токов
         """
-        # Проверяем тип входных данных
         if not isinstance(v_arr, np.ndarray):
-            try:
-                v_arr = np.array(v_arr)
-                logger.debug(f"Преобразование v_arr из {type(v_arr).__name__} в np.ndarray")
-            except Exception as e:
-                logger.error(f"Не удалось преобразовать входные данные в массив: {e}")
-                # Возвращаем массив нулей как запасной вариант
-                return np.zeros(1) if np.isscalar(v_arr) else np.zeros(len(v_arr))
-        
-        # Если это скаляр или пустой массив, обрабатываем их
-        if np.isscalar(v_arr) or v_arr.size == 0:
-            logger.warning(f"v_arr является скаляром или пустым массивом: {v_arr}")
-            if np.isscalar(v_arr):
-                return np.array([self._static_current(float(v_arr))])
-            else:
-                return np.zeros(0)
-                
-        # Устанавливаем значение dt по умолчанию, если не задано
-        if dt is None:
-            dt = 1e-6
-        
-        # Проверка корректности dt
-        if dt <= 0:
-            logger.warning(f"Некорректное значение dt={dt}, используем значение по умолчанию")
-            dt = 1e-6
-            
-        # Выбор метода интегрирования
-        try:
-            logger.debug(f"Симуляция с использованием метода {method}, dt = {dt}")
-            if method.lower() == 'rk2':
-                return self._simulate_rk2(v_arr, dt)
-            elif method.lower() == 'rk4':
-                return self._simulate_rk4(v_arr, dt)
-            else:  # 'euler' по умолчанию
-                return self._simulate_euler(v_arr, dt)
-        except Exception as e:
-            logger.error(f"Ошибка при симуляции с методом {method}: {e}")
-            # В случае ошибки пробуем использовать статическую модель
-            logger.warning("Пробуем использовать статическую модель в качестве запасного варианта")
-            try:
-                return self._static_current_vector(v_arr)
-            except Exception as e2:
-                logger.error(f"Ошибка при использовании статической модели: {e2}")
-                # Если и это не сработало, возвращаем нули
-                return np.zeros_like(v_arr)
+            v_arr = np.array(v_arr)
+        if v_arr.ndim != 1 or v_arr.size == 0:
+            raise ValueError("v_arr должен быть одномерным непустым массивом")
+        i_arr = np.zeros_like(v_arr)
+        state = np.array([self.T, 0.0])
+        for idx, v in enumerate(v_arr):
+            T, H = state
+            i0 = self._static_current(v)
+            i0 *= 1 + self.alphaT * (T - 300)
+            i0 *= (1 - self.p.get('beta_h', 0.1) * H)
+            i_arr[idx] = i0
+            dT_dt = (v * i0 - (T - 300) / self.Rth) / self.Cth
+            dH_dt = -H / self.tauH
+            state = state + dt * np.array([dT_dt, dH_dt])
+        return i_arr
     
     def simulate_static_iv(self, v_min: float, v_max: float, num_points: int = 100) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -733,3 +672,21 @@ if NUMBA_AVAILABLE:
     except Exception as e:
         logger.warning(f"Не удалось применить Numba JIT-компиляцию: {e}")
         logger.debug(traceback.format_exc())
+
+# Генерация сигналов
+class SignalGenerator:
+    @staticmethod
+    def sweep(vmin: float, vmax: float, samples: int) -> Tuple[np.ndarray, np.ndarray]:
+        if samples < 2 or vmin >= vmax:
+            raise ValueError("Некорректные параметры sweep")
+        t = np.linspace(0, 1, samples)
+        v = np.linspace(vmin, vmax, samples)
+        return t, v
+    @staticmethod
+    def sine(vmin: float, vmax: float, samples: int, periods: float = 1) -> Tuple[np.ndarray, np.ndarray]:
+        if samples < 2 or vmin >= vmax or periods <= 0:
+            raise ValueError("Некорректные параметры sine")
+        t = np.linspace(0, 1, samples)
+        A, D = (vmax-vmin)/2, (vmax+vmin)/2
+        v = D + A * np.sin(2 * np.pi * periods * t)
+        return t, v

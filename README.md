@@ -71,6 +71,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Запуск GUI
+
+```
+python main.py
+```
+
+## Тесты
+
+```
+pytest tests/
+```
+
 ## Использование
 
 1. **Загрузка Verilog-A модели**:

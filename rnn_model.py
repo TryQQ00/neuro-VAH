@@ -8,6 +8,7 @@ import random
 from typing import Callable, Dict, Tuple, List, Optional, Union
 from torch.utils.data import DataLoader, TensorDataset, Dataset, random_split
 from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -100,77 +101,37 @@ class PhysicsInformedDataset(Dataset):
         return v, i_phys, i
 
 
-class PhysicsInformedRNN(nn.Module):
-    """
-    Гибридная модель: физическая модель I0 + коррекция RNN.
-    
-    Attributes:
-        rnn (nn.LSTM): Рекуррентный слой LSTM
-        fc (nn.Linear): Полносвязный слой для выходного сигнала
-        dropout (nn.Dropout): Слой dropout для регуляризации
-        hidden_size (int): Размер скрытого состояния
-        num_layers (int): Количество слоев LSTM
-    """
-    def __init__(self, hidden_size: int, num_layers: int, dropout: float = 0.2):
-        """
-        Инициализирует модель.
-        
-        Args:
-            hidden_size (int): Размер скрытого состояния
-            num_layers (int): Количество слоев LSTM
-            dropout (float): Вероятность dropout (по умолчанию 0.2)
-        """
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        
-        # Входные данные: [V, I_phys]
-        self.rnn = nn.LSTM(
-            input_size=2, 
-            hidden_size=hidden_size, 
-            num_layers=num_layers, 
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
-        self.dropout = nn.Dropout(dropout)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
         self.fc = nn.Linear(hidden_size, 1)
-        
-        # Инициализация весов
-        self._init_weights()
-        
-    def _init_weights(self):
-        """Инициализирует веса модели для улучшения сходимости."""
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_normal_(param)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
-
-    def forward(self, V: torch.Tensor, Iphys: torch.Tensor) -> torch.Tensor:
-        """
-        Выполняет прямой проход модели.
-        
-        Args:
-            V (torch.Tensor): Тензор напряжений [batch, seq_len, 1]
-            Iphys (torch.Tensor): Тензор физических токов [batch, seq_len, 1]
-            
-        Returns:
-            torch.Tensor: Предсказанный тензор токов [batch, seq_len, 1]
-        """
-        # Конкатенация напряжения и физического тока
-        x = torch.cat([V, Iphys], dim=2)  # [batch, seq_len, 2]
-        
-        # Прогон через LSTM
-        out, _ = self.rnn(x)  # [batch, seq_len, hidden_size]
-        
-        # Применяем dropout
-        out = self.dropout(out)
-        
-        # Преобразуем в выходной размер
-        out = self.fc(out)  # [batch, seq_len, 1]
-        
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.fc(out)
         return out
 
+def train_model(model, device, X, Y, epochs=50, lr=1e-3, batch_size=32, save_plot_path=None):
+    model = model.to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    losses = []
+    for epoch in range(epochs):
+        model.train()
+        optimizer.zero_grad()
+        out = model(X)
+        loss = criterion(out, Y)
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    if save_plot_path:
+        plt.figure()
+        plt.plot(losses)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training Loss')
+        plt.savefig(save_plot_path)
+    return model, losses
 
 class EarlyStopping:
     """
@@ -259,9 +220,8 @@ class ModelTrainer:
     """
     def __init__(
         self, 
-        model: PhysicsInformedRNN, 
+        model: LSTMModel, 
         device: torch.device, 
-        phys_func: Callable,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-5,
         checkpoint_dir: str = 'checkpoints'
@@ -272,14 +232,12 @@ class ModelTrainer:
         Args:
             model (PhysicsInformedRNN): Модель для обучения
             device (torch.device): Устройство для вычислений (GPU/CPU)
-            phys_func (Callable): Функция для расчета физических токов
             learning_rate (float): Скорость обучения
             weight_decay (float): Коэффициент L2-регуляризации
             checkpoint_dir (str): Директория для сохранения чекпоинтов
         """
         self.model = model.to(device)
         self.dev = device
-        self.phys_func = phys_func
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(
             model.parameters(), 
@@ -397,7 +355,7 @@ class ModelTrainer:
                 self.optimizer.zero_grad()
                 
                 # Прямой проход
-                pred = self.model(Vb, Ip)
+                pred = self.model(Vb)
                 
                 # Вычисляем потери
                 loss = self.criterion(pred, Ib)
@@ -423,7 +381,7 @@ class ModelTrainer:
                     Vb, Ip, Ib = Vb.to(self.dev), Ip.to(self.dev), Ib.to(self.dev)
                     
                     # Прямой проход
-                    pred = self.model(Vb, Ip)
+                    pred = self.model(Vb)
                     
                     # Вычисляем потери
                     loss = self.criterion(pred, Ib)
@@ -528,7 +486,7 @@ class ModelTrainer:
             Vseq, Iseq = Vseq.to(self.dev), Iseq.to(self.dev)
             
             # Прямой проход
-            pred = self.model(Vseq, phys)
+            pred = self.model(Vseq)
             
             # Вычисляем метрики
             mse = self.criterion(pred, Iseq).item()
@@ -574,9 +532,9 @@ class ModelTrainer:
         try:
             torch.onnx.export(
                 self.model,
-                (Vdummy, Idummy),
+                Vdummy,
                 path,
-                input_names=['V', 'Iphys'],
+                input_names=['V'],
                 output_names=['Ipred'],
                 dynamic_axes=dynamic_axes_dict,
                 export_params=True,
