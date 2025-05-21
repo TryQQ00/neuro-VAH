@@ -1,0 +1,37 @@
+`include "disciplines.vams"
+
+module mosfet2(drain, gate, source);
+    inout drain, gate, source;
+    electrical drain, gate, source;
+    
+    parameter real Vth = 1.2;     // Пороговое напряжение (выше)
+    parameter real K = 1e-5;      // Коэффициент усиления (меньше)
+    parameter real Lambda = 0.02; // Коэффициент модуляции длины канала (больше)
+    parameter real Gamma = 0.0;
+    parameter real Phi = 0.6;
+    parameter real Cgso = 2e-9;
+    parameter real Cgdo = 2e-9;
+    parameter real Cgbo = 2e-10;
+    parameter real Cj = 4e-10;
+    parameter real Rth = 200.0;
+    parameter real Cth = 2e-3;
+    real vgs, vds, id, gm, gds, T;
+    analog begin
+        vgs = V(gate, source);
+        vds = V(drain, source);
+        T = Pwr(vds, I(drain, source)) * Rth * (1.0 - exp(-$abstime/(Rth*Cth)));
+        if (vgs <= Vth) begin
+            id = 1e-12 * exp((vgs-Vth)/(0.026*(1+T*0.01)));
+        end else if (vds < vgs - Vth) begin
+            id = K * (2*(vgs-Vth)*vds - vds*vds) * (1 + Lambda*vds) * (1 + T*0.01);
+        end else begin
+            id = K * (vgs-Vth)*(vgs-Vth) * (1 + Lambda*vds) * (1 + T*0.01);
+        end
+        I(drain, source) <+ id;
+        I(gate, source) <+ ddt(Cgso * V(gate, source));
+        I(gate, drain) <+ ddt(Cgdo * V(gate, drain));
+        if (vds > 0) begin
+            I(drain, source) <+ ddt(Cj * (1 - vds/0.6)^(-0.5) * vds);
+        end
+    end
+endmodule

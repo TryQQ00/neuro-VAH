@@ -1,0 +1,27 @@
+`include "disciplines.vams"
+
+module diode2(anode, cathode);
+    inout anode, cathode;
+    electrical anode, cathode;
+    
+    parameter real Is = 5e-13;   // Ток насыщения (больше)
+    parameter real N = 2.0;      // Фактор идеальности (больше)
+    parameter real Rs = 2.0;     // Последовательное сопротивление (больше)
+    parameter real Cj0 = 2e-12;
+    parameter real Vj = 0.8;
+    parameter real M = 0.4;
+    parameter real Rth = 80.0;
+    parameter real Cth = 2e-3;
+    parameter real alphaT = 2e-3;
+    real v, i, vd, id, T, dT;
+    analog begin
+        v = V(anode, cathode);
+        i = I(anode, cathode);
+        vd = v - i*Rs;
+        dT = Pwr(v, i) * Rth;
+        T = dT * (1.0 - exp(-$abstime/(Rth*Cth)));
+        id = Is * exp(vd/(N*0.026*(1 + alphaT*T))) * (1 + alphaT*T);
+        I(anode, cathode) <+ id;
+        I(anode, cathode) <+ ddt(Cj0 * pow(1 - min(vd, Vj-0.1)/Vj, -M) * v);
+    end
+endmodule

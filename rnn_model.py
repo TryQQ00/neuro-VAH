@@ -51,9 +51,13 @@ class PhysicsInformedDataset(Dataset):
         v = self.V[idx]
         i = self.I[idx]
         
+        # Гарантируем, что v_np всегда 1D
+        v_np = v.squeeze(-1).cpu().numpy()
+        if v_np.ndim > 1:
+            v_np = v_np.reshape(-1)
+        
         # Вычисляем физический ток только если его еще нет в кэше
         if idx not in self.phys_cache:
-            v_np = v.squeeze(-1).cpu().numpy()
             i_phys_np = self.phys_func(v_np)
             
             # Убедимся, что i_phys_np имеет правильную форму перед созданием тензора
@@ -102,20 +106,41 @@ class PhysicsInformedDataset(Dataset):
 
 
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+    def __init__(self, input_size=1, hidden_size=32, num_layers=3, dropout=0.2):
+        super(LSTMModel, self).__init__()
+        self.lstm1 = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
+        self.elu = nn.ELU()
+        self.layernorm1 = nn.LayerNorm(hidden_size)
+        self.lstm2 = nn.LSTM(hidden_size, hidden_size, num_layers=1, batch_first=True)
+        self.tanh = nn.Tanh()
+        self.layernorm2 = nn.LayerNorm(hidden_size)
+        self.lstm3 = nn.LSTM(hidden_size, hidden_size, num_layers=1, batch_first=True)
+        self.layernorm3 = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, 1)
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.fc(out)
-        return out
 
-def train_model(model, device, X, Y, epochs=50, lr=1e-3, batch_size=32, save_plot_path=None):
+    def forward(self, x):
+        out1, _ = self.lstm1(x)
+        out1 = self.elu(out1)
+        out1 = self.layernorm1(out1)
+        out1 = self.dropout(out1)
+        out2, _ = self.lstm2(out1)
+        out2 = self.tanh(out2)
+        out2 = self.layernorm2(out2)
+        out2 = self.dropout(out2)
+        out3, _ = self.lstm3(out2)
+        out3 = self.tanh(out3)
+        out3 = self.layernorm3(out3)
+        out3 = self.dropout(out3)
+        out_final = self.fc(out3)
+        return out_final
+
+def train_model(model, device, X, Y, epochs=50, lr=1e-3, batch_size=32, save_plot_path=None, smooth_alpha=0.1):
     model = model.to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     losses = []
+    smoothed_losses = []
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
@@ -124,12 +149,19 @@ def train_model(model, device, X, Y, epochs=50, lr=1e-3, batch_size=32, save_plo
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
+        # EMA сглаживание
+        if len(smoothed_losses) == 0:
+            smoothed_losses.append(loss.item())
+        else:
+            smoothed_losses.append(smooth_alpha * loss.item() + (1 - smooth_alpha) * smoothed_losses[-1])
     if save_plot_path:
         plt.figure()
-        plt.plot(losses)
+        plt.plot(losses, label='Raw Loss')
+        plt.plot(smoothed_losses, label='Smoothed Loss', linewidth=2)
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Training Loss')
+        plt.legend()
         plt.savefig(save_plot_path)
     return model, losses
 
@@ -248,8 +280,7 @@ class ModelTrainer:
             self.optimizer, 
             mode='min', 
             factor=0.5, 
-            patience=3, 
-            verbose=True
+            patience=3
         )
         self.checkpoint_dir = checkpoint_dir
         
@@ -260,6 +291,7 @@ class ModelTrainer:
         self.train_losses = []
         self.val_losses = []
         self.best_val_loss = float('inf')
+        self.phys_func = None  # Добавлено: по умолчанию None
         
     def set_seed(self, seed: int = 42):
         """
@@ -279,11 +311,12 @@ class ModelTrainer:
         self, 
         Vseq: torch.Tensor, 
         Iseq: torch.Tensor, 
-        epochs: int = 50, 
+        epochs: int = 200, 
         batch_size: int = 32,
         val_split: float = 0.2,
-        patience: int = 5,
-        seed: Optional[int] = 42
+        patience: int = 10,
+        seed: Optional[int] = 42,
+        phys_reg_alpha: float = 0.1
     ) -> Dict[str, List[float]]:
         """
         Обучает модель с разделением на train/validation и ранней остановкой.
@@ -296,6 +329,7 @@ class ModelTrainer:
             val_split (float): Доля данных для валидации (0-1)
             patience (int): Количество эпох без улучшений до остановки
             seed (int): Значение seed для воспроизводимости
+            phys_reg_alpha (float): Коэффициент физической регуляризации
             
         Returns:
             Dict[str, List[float]]: Словарь с историей потерь train/val
@@ -305,31 +339,42 @@ class ModelTrainer:
             
         # Создаем датасет
         dataset = PhysicsInformedDataset(Vseq, Iseq, self.phys_func)
-        
-        # Разделяем на train/validation
-        train_size = int((1 - val_split) * len(dataset))
-        val_size = len(dataset) - train_size
-        
-        train_dataset, val_dataset = random_split(
-            dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(seed if seed is not None else 42)
-        )
-        
-        # Создаем даталоадеры
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            num_workers=0
-        )
-        
-        val_loader = DataLoader(
-            val_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=0
-        )
-        
+
+        if val_split == 0 or len(dataset) == 1:
+            # Без валидации
+            train_dataset = dataset
+            val_dataset = None
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=batch_size, 
+                shuffle=True,
+                num_workers=0
+            )
+            val_loader = None
+            logger.info("Валидация отключена (val_split=0 или только один пример)")
+        else:
+            # Разделяем на train/validation
+            train_size = int((1 - val_split) * len(dataset))
+            val_size = len(dataset) - train_size
+            if train_size <= 0 or val_size <= 0:
+                raise ValueError(f"Недостаточно данных для обучения/валидации: train_size={train_size}, val_size={val_size}")
+            train_dataset, val_dataset = random_split(
+                dataset, [train_size, val_size],
+                generator=torch.Generator().manual_seed(seed if seed is not None else 42)
+            )
+            train_loader = DataLoader(
+                train_dataset, 
+                batch_size=batch_size, 
+                shuffle=True,
+                num_workers=0
+            )
+            val_loader = DataLoader(
+                val_dataset, 
+                batch_size=batch_size, 
+                shuffle=False,
+                num_workers=0
+            )
+
         # Инициализируем раннюю остановку
         early_stopping = EarlyStopping(patience=patience)
         checkpoint_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
@@ -339,7 +384,8 @@ class ModelTrainer:
         self.val_losses = []
         
         # Обучение
-        logger.info(f"Начинаем обучение на {train_size} примерах, валидация на {val_size} примерах")
+        logger.info(f"Начинаем обучение на {len(train_dataset)} примерах" +
+                    (f", валидация на {len(val_dataset)} примерах" if val_dataset is not None else ""))
         logger.info(f"Устройство: {self.dev}, Эпохи: {epochs}, Batch Size: {batch_size}")
         
         for epoch in range(epochs):
@@ -360,6 +406,21 @@ class ModelTrainer:
                 # Вычисляем потери
                 loss = self.criterion(pred, Ib)
                 
+                # Физическая регуляризация
+                if self.phys_func is not None and phys_reg_alpha > 0:
+                    with torch.no_grad():
+                        # Vb: [batch, seq_len, 1] -> [batch, seq_len]
+                        v_np = Vb.squeeze(-1).cpu().numpy()
+                        if v_np.ndim == 1:
+                            phys = torch.tensor(self.phys_func(v_np), dtype=torch.float32).to(self.dev)
+                        elif v_np.ndim == 2:
+                            phys = torch.tensor(self.phys_func(v_np), dtype=torch.float32).to(self.dev)
+                        else:
+                            raise ValueError("Vb для phys_func должен быть 2D или 1D")
+                        if phys.shape != pred.shape:
+                            phys = phys.view_as(pred)
+                    loss = loss + phys_reg_alpha * self.criterion(pred, phys)
+                
                 # Обратный проход и оптимизация
                 loss.backward()
                 self.optimizer.step()
@@ -371,41 +432,44 @@ class ModelTrainer:
             train_loss /= len(train_loader)
             self.train_losses.append(train_loss)
             
-            # Режим оценки
-            self.model.eval()
-            val_loss = 0.0
-            
-            with torch.no_grad():
-                for Vb, Ip, Ib in val_loader:
-                    # Перемещаем данные на устройство
-                    Vb, Ip, Ib = Vb.to(self.dev), Ip.to(self.dev), Ib.to(self.dev)
-                    
-                    # Прямой проход
-                    pred = self.model(Vb)
-                    
-                    # Вычисляем потери
-                    loss = self.criterion(pred, Ib)
-                    
-                    # Учитываем потери
-                    val_loss += loss.item()
-            
-            # Средние потери за эпоху
-            val_loss /= len(val_loader)
-            self.val_losses.append(val_loss)
-            
-            # Обновляем планировщик
-            self.scheduler.step(val_loss)
-            
-            # Выводим прогресс
-            logger.info(f"Эпоха {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
-            
-            # Проверяем раннюю остановку
-            if early_stopping(val_loss, self.model, checkpoint_path):
-                logger.info(f"Ранняя остановка на эпохе {epoch+1}")
-                break
+            # Валидация, если есть
+            if val_loader is not None:
+                self.model.eval()
+                val_loss = 0.0
+                
+                with torch.no_grad():
+                    for Vb, Ip, Ib in val_loader:
+                        # Перемещаем данные на устройство
+                        Vb, Ip, Ib = Vb.to(self.dev), Ip.to(self.dev), Ib.to(self.dev)
+                        
+                        # Прямой проход
+                        pred = self.model(Vb)
+                        
+                        # Вычисляем потери
+                        loss = self.criterion(pred, Ib)
+                        
+                        # Учитываем потери
+                        val_loss += loss.item()
+                
+                # Средние потери за эпоху
+                val_loss /= len(val_loader)
+                self.val_losses.append(val_loss)
+                
+                # Обновляем планировщик
+                self.scheduler.step(val_loss)
+                
+                # Выводим прогресс
+                logger.info(f"Эпоха {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+                
+                # Проверяем раннюю остановку
+                if early_stopping(val_loss, self.model, checkpoint_path):
+                    logger.info(f"Ранняя остановка на эпохе {epoch+1}")
+                    break
+            else:
+                logger.info(f"Эпоха {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}")
         
-        # Загружаем лучшую модель
-        if os.path.exists(checkpoint_path):
+        # Загружаем лучшую модель, если была валидация
+        if val_loader is not None and os.path.exists(checkpoint_path):
             logger.info(f"Загружаем лучшую модель из {checkpoint_path}")
             self.model.load_state_dict(torch.load(checkpoint_path))
         

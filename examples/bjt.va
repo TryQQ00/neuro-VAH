@@ -1,0 +1,21 @@
+`include "disciplines.vams"
+
+module bjt(collector, base, emitter);
+    inout collector, base, emitter;
+    electrical collector, base, emitter;
+    
+    parameter real IS = 1e-15;
+    parameter real BF = 100;
+    parameter real BR = 1;
+    parameter real Vt = 0.02585;
+    real vbe, vbc, ic, ib, ie;
+    analog begin
+        vbe = V(base, emitter);
+        vbc = V(base, collector);
+        ib = IS * (exp(vbe/Vt) - 1) + IS * (exp(vbc/Vt) - 1);
+        ic = BF * IS * (exp(vbe/Vt) - 1) - BR * IS * (exp(vbc/Vt) - 1);
+        ie = ic + ib;
+        I(collector, emitter) <+ ic;
+        I(base, emitter) <+ ib;
+    end
+endmodule

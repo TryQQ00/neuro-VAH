@@ -40,7 +40,7 @@ class DeviceModel:
         tauH (float): Постоянная времени гистерезиса
     """
     
-    SUPPORTED_DEVICES = ['Диод']
+    SUPPORTED_DEVICES = ['Диод', 'MOSFET', 'BJT']
     INTEGRATION_METHODS = ['euler', 'rk2', 'rk4', 'adaptive']
     
     def __init__(self, params: Dict[str, float], dev_type: str):
@@ -127,7 +127,7 @@ class DeviceModel:
         Вычисляет статический ток через устройство.
         
         Args:
-            v (float): Напряжение
+            v (float): Напряжение (для MOSFET — Vds, для BJT — Vbe)
             
         Returns:
             float: Ток через устройство
@@ -136,7 +136,33 @@ class DeviceModel:
             Is = self.p.get('Is', 1e-14)
             n = self.p.get('N', 1.0)
             Vt = 0.02585 * (self.T / 300)
-            return Is * (np.exp(v / (n * Vt)) - 1)
+            arg = v / (n * Vt)
+            # Ограничение экспоненты для предотвращения переполнения
+            arg = np.clip(arg, -100, 100)
+            return Is * (np.exp(arg) - 1)
+        elif self.dev == 'MOSFET':
+            # v — это Vds, Vgs задаём через параметры
+            Vgs = self.p.get('Vgs', 2.0)
+            Vth = self.p.get('Vth', 0.7)
+            K = self.p.get('K', 2e-5)
+            Lambda = self.p.get('Lambda', 0.01)
+            if Vgs <= Vth:
+                # Подпороговый режим
+                return 1e-12 * np.exp((Vgs-Vth)/0.026)
+            elif v < Vgs - Vth:
+                # Линейный режим
+                return K * (2*(Vgs-Vth)*v - v*v) * (1 + Lambda*v)
+            else:
+                # Насыщение
+                return K * (Vgs-Vth)**2 * (1 + Lambda*v)
+        elif self.dev == 'BJT':
+            # v — это Vce, Vbe задаём через параметры
+            Vbe = self.p.get('Vbe', 0.7)
+            Is = self.p.get('IS', 1e-15)
+            beta = self.p.get('BF', 100)
+            Vt = self.p.get('Vt', 0.02585)
+            # Модель: Ic = beta * Is * (exp(Vbe/Vt) - 1)
+            return beta * Is * (np.exp(Vbe / Vt) - 1)
         return 0.0
         
     def _static_current_vector(self, v_arr: np.ndarray) -> np.ndarray:
@@ -170,15 +196,33 @@ class DeviceModel:
             Is = self.p.get('Is', 1e-14)
             n = self.p.get('N', 1.0)
             Vt = 0.02585 * (self.T / 300)
-            return Is * (np.exp(v_arr / (n * Vt)) - 1)
+            arg = v_arr / (n * Vt)
+            arg = np.clip(arg, -100, 100)
+            return Is * (np.exp(arg) - 1)
+            
+        # MOSFET
+        elif self.dev == 'MOSFET':
+            Vgs = self.p.get('Vgs', 2.0)
+            Vth = self.p.get('Vth', 0.7)
+            K = self.p.get('K', 2e-5)
+            Lambda = self.p.get('Lambda', 0.01)
+            i_arr = np.zeros_like(v_arr)
+            for idx, vds in enumerate(v_arr):
+                if Vgs <= Vth:
+                    i_arr[idx] = 1e-12 * np.exp((Vgs-Vth)/0.026)
+                elif vds < Vgs - Vth:
+                    i_arr[idx] = K * (2*(Vgs-Vth)*vds - vds*vds) * (1 + Lambda*vds)
+                else:
+                    i_arr[idx] = K * (Vgs-Vth)**2 * (1 + Lambda*vds)
+            return i_arr
             
         # Биполярный транзистор
         elif self.dev == 'BJT':
+            Vbe = self.p.get('Vbe', 0.7)
             Is = self.p.get('IS', 1e-15)
             beta = self.p.get('BF', 100)
             Vt = self.p.get('Vt', 0.02585 * (self.T / 300))
-            ib = Is * (np.exp(v_arr / Vt) - 1)
-            return beta * ib
+            return beta * Is * (np.exp(Vbe / Vt) - 1) * np.ones_like(v_arr)
             
         # HEMT
         elif self.dev == 'HEMT':

@@ -1,4 +1,4 @@
-`include "disciplines.vams"
+'include "disciplines.vams"
 
 module memristor(p, n);
     inout p, n;
